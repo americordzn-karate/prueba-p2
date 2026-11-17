@@ -12,7 +12,9 @@
 
 <button id="conectar">Conectar P2</button>
 <button id="probar" disabled>Probar canales</button>
-
+<button id="identificar" disabled>
+  Identificar protocolo P2
+</button>
 <pre id="resultado">Esperando conexión...</pre>
 
 <script>
@@ -99,6 +101,7 @@ async () => {
     }
 
     document.getElementById("probar").disabled = false;
+    document.getElementById("identificar").disabled = false;
     log("Diagnóstico listo.");
 
   } catch (e) {
@@ -137,6 +140,32 @@ async () => {
   }
 
   log("Pruebas terminadas.");
+};
+document.getElementById("identificar").onclick =
+async () => {
+
+  const commands = [
+    ["Firmware", [0x10, 0xFF, 0x20, 0xF1]],
+    ["Número de serie", [0x10, 0xFF, 0x20, 0xF2]],
+    ["Estado", [0x10, 0xFF, 0x40]]
+  ];
+
+  for (const [name, bytes] of commands) {
+    try {
+      await tx.writeValueWithoutResponse(
+        new Uint8Array(bytes)
+      );
+
+      log("Consulta enviada: " + name);
+
+      await new Promise(resolve =>
+        setTimeout(resolve, 1500)
+      );
+
+    } catch (error) {
+      log("Error: " + error.message);
+    }
+  }
 };
 </script>
 
