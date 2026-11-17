@@ -1,0 +1,92 @@
+
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba impresora P2</title>
+</head>
+<body>
+
+<h2>Conexión impresora P2</h2>
+
+<button id="conectar">Conectar P2</button>
+<button id="consultar" disabled>Consultar modelo</button>
+
+<pre id="resultado">Esperando conexión...</pre>
+
+<script>
+const SERVICE = "0000ff00-0000-1000-8000-00805f9b34fb";
+const TX = "0000ff02-0000-1000-8000-00805f9b34fb";
+const RX = "0000ff01-0000-1000-8000-00805f9b34fb";
+
+let printer;
+let tx;
+let rx;
+
+const log = (msg) => {
+  document.getElementById("resultado").textContent +=
+    "\n" + msg;
+};
+
+document.getElementById("conectar").onclick = async () => {
+  try {
+    printer = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "P2" }],
+      optionalServices: [SERVICE]
+    });
+
+    log("Dispositivo: " + printer.name);
+
+    const server = await printer.gatt.connect();
+    const service = await server.getPrimaryService(SERVICE);
+
+    tx = await service.getCharacteristic(TX);
+    rx = await service.getCharacteristic(RX);
+
+    await rx.startNotifications();
+
+    rx.addEventListener("characteristicvaluechanged", (event) => {
+      const data = new Uint8Array(
+        event.target.value.buffer,
+        event.target.value.byteOffset,
+        event.target.value.byteLength
+      );
+
+      const hex = Array.from(data)
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join(" ");
+
+      const ascii = new TextDecoder().decode(data);
+
+      log("Respuesta HEX: " + hex);
+      log("Respuesta texto: " + ascii);
+    });
+
+    log("Conexión establecida correctamente.");
+
+    document.getElementById("consultar").disabled = false;
+
+  } catch (error) {
+    log("ERROR: " + error.message);
+  }
+};
+
+document.getElementById("consultar").onclick = async () => {
+  try {
+    const command = new Uint8Array([
+      0x10, 0xFF, 0x20, 0xF0
+    ]);
+
+    await tx.writeValueWithoutResponse(command);
+
+    log("Consulta enviada. Esperando respuesta...");
+
+  } catch (error) {
+    log("ERROR: " + error.message);
+  }
+};
+</script>
+
+</body>
+</html>
