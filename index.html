@@ -4,32 +4,66 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Diagnóstico P2</title>
+<title>Prueba de impresión P2</title>
+
+<style>
+body {
+  font-family: Arial, sans-serif;
+  padding: 20px;
+  background: #f4f4f4;
+}
+button {
+  display: block;
+  width: 100%;
+  padding: 15px;
+  margin: 12px 0;
+  font-size: 16px;
+  border: 0;
+  border-radius: 8px;
+  background: #222;
+  color: white;
+}
+button:disabled {
+  opacity: .4;
+}
+pre {
+  background: #fff;
+  padding: 12px;
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+</style>
 </head>
+
 <body>
 
-<h2>Diagnóstico Bluetooth P2</h2>
+<h2>Impresora P2</h2>
 
-<button id="conectar">Conectar P2</button>
-<button id="probar" disabled>Probar canales</button>
-<button id="identificar" disabled>
-  Identificar protocolo P2
+<button id="conectar">1. Conectar P2</button>
+<button id="imprimir" disabled>
+  2. Imprimir etiqueta de prueba
 </button>
+
 <pre id="resultado">Esperando conexión...</pre>
 
 <script>
-const UUID = {
-  ff00: "0000ff00-0000-1000-8000-00805f9b34fb",
-  ff01: "0000ff01-0000-1000-8000-00805f9b34fb",
-  ff02: "0000ff02-0000-1000-8000-00805f9b34fb",
-  ff03: "0000ff03-0000-1000-8000-00805f9b34fb",
-  ff10: "0000ff10-0000-1000-8000-00805f9b34fb",
-  ff11: "0000ff11-0000-1000-8000-00805f9b34fb",
-  ff12: "0000ff12-0000-1000-8000-00805f9b34fb"
-};
 
-let services = {};
-let characteristics = {};
+const SERVICE =
+"0000ff00-0000-1000-8000-00805f9b34fb";
+
+const TX =
+"0000ff02-0000-1000-8000-00805f9b34fb";
+
+const FLOW =
+"0000ff03-0000-1000-8000-00805f9b34fb";
+
+let printer;
+let tx;
+let flow;
+
+let credits = 0;
+let waiters = [];
 
 const output = document.getElementById("resultado");
 
@@ -37,136 +71,209 @@ function log(message) {
   output.textContent += "\n" + message;
 }
 
-function listen(characteristic, name) {
-  characteristic.addEventListener(
-    "characteristicvaluechanged", event => {
-      const value = event.target.value;
-      const data = new Uint8Array(
-        value.buffer, value.byteOffset, value.byteLength
-      );
+// Recibir créditos de transmisión
+function onFlow(event) {
 
-      const hex = [...data]
-        .map(b => b.toString(16).padStart(2, "0"))
-        .join(" ");
+  const value = event.target.value;
 
-      log(name + " RECIBIDO: " + hex);
+  const data = new Uint8Array(
+    value.buffer,
+    value.byteOffset,
+    value.byteLength
+  );
+
+  const hex = [...data]
+    .map(b => b.toString(16).padStart(2, "0"))
+    .join(" ");
+
+  log("FF03: " + hex);
+
+  // Protocolo de créditos: 01 + cantidad
+  if (data.length >= 2 && data[0] === 0x01) {
+
+    credits += data[1];
+
+    log("Créditos disponibles: " + credits);
+
+    while (credits > 0 && waiters.length > 0) {
+
+      credits--;
+
+      const waiter = waiters.shift();
+      waiter.resolve();
     }
+  }
+}
+
+// Esperar un crédito antes de enviar cada paquete
+function waitCredit() {
+
+  if (credits > 0) {
+    credits--;
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+
+    const waiter = {
+      resolve: () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      reject
+    };
+
+    const timer = setTimeout(() => {
+
+      const index = waiters.indexOf(waiter);
+
+      if (index !== -1) {
+        waiters.splice(index, 1);
+      }
+
+      reject(new Error(
+        "Tiempo agotado esperando crédito Bluetooth"
+      ));
+
+    }, 10000);
+
+    waiters.push(waiter);
+  });
+}
+
+// Conexión Bluetooth
+document.getElementById("conectar").onclick =
+async () => {
+
+  try {
+
+    document.getElementById("conectar").disabled = true;
+
+    printer = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "P2" }],
+      optionalServices: [SERVICE]
+    });
+
+    log("Dispositivo: " + printer.name);
+
+    const server = await printer.gatt.connect();
+
+    const service =
+      await server.getPrimaryService(SERVICE);
+
+    tx = await service.getCharacteristic(TX);
+
+    flow = await service.getCharacteristic(FLOW);
+
+    flow.addEventListener(
+      "characteristicvaluechanged",
+      onFlow
+    );
+
+    await flow.startNotifications();
+
+    log("Canal de impresión preparado.");
+    log("Esperando créditos de transmisión...");
+
+    document.getElementById("imprimir").disabled = false;
+
+    printer.addEventListener(
+      "gattserverdisconnected",
+      () => {
+        document.getElementById("imprimir").disabled = true;
+        log("Impresora desconectada.");
+      }
+    );
+
+  } catch (error) {
+
+    log("ERROR: " + error.message);
+
+    document.getElementById("conectar").disabled = false;
+  }
+};
+
+// Enviar datos por paquetes BLE
+async function sendData(data) {
+
+  const CHUNK_SIZE = 20;
+
+  for (let i = 0; i < data.length; i += CHUNK_SIZE) {
+
+    const chunk = data.slice(i, i + CHUNK_SIZE);
+
+    await waitCredit();
+
+    try {
+
+      await tx.writeValueWithoutResponse(chunk);
+
+      log("Paquete enviado: " +
+        Math.min(i + CHUNK_SIZE, data.length) +
+        " / " + data.length);
+
+    } catch (error) {
+
+      credits++;
+
+      throw error;
+    }
+  }
+}
+
+// Construir etiqueta TSPL
+function buildLabel() {
+
+  const commands = [
+    "SIZE 50 mm,30 mm",
+    "GAP 2 mm,0 mm",
+    "DENSITY 8",
+    "SPEED 3",
+    "DIRECTION 0,0",
+    "CLS",
+
+    'TEXT 30,30,"3",0,1,1,"SENSHI-KAN"',
+    'TEXT 30,95,"3",0,1,1,"PRUEBA P2"',
+    'TEXT 30,160,"2",0,1,1,"50 x 30 mm"',
+
+    "PRINT 1,1"
+  ];
+
+  return new TextEncoder().encode(
+    commands.join("\r\n") + "\r\n"
   );
 }
 
-document.getElementById("conectar").onclick =
+// Imprimir
+document.getElementById("imprimir").onclick =
 async () => {
+
   try {
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "P2" }],
-      optionalServices: [UUID.ff00, UUID.ff10]
-    });
 
-    log("Dispositivo: " + device.name);
+    document.getElementById("imprimir").disabled = true;
 
-    const server = await device.gatt.connect();
+    log("Preparando etiqueta...");
 
-    for (const [name, id] of [
-      ["ff00", UUID.ff00],
-      ["ff10", UUID.ff10]
-    ]) {
-      try {
-        services[name] = await server.getPrimaryService(id);
-        log("Servicio " + name + " conectado.");
-      } catch (e) {
-        log("Servicio " + name + ": " + e.message);
-      }
-    }
+    const data = buildLabel();
 
-    for (const [name, service, ids] of [
-      ["ff00", services.ff00, ["ff01", "ff02", "ff03"]],
-      ["ff10", services.ff10, ["ff11", "ff12"]]
-    ]) {
-      if (!service) continue;
+    log("Tamaño del trabajo: " + data.length + " bytes");
 
-      for (const id of ids) {
-        try {
-          const ch = await service.getCharacteristic(UUID[id]);
-          characteristics[id] = ch;
+    await sendData(data);
 
-          if (["ff01", "ff03", "ff11", "ff12"].includes(id)) {
-            listen(ch, id);
-            await ch.startNotifications();
-            log("Notificaciones activadas: " + id);
-          }
-        } catch (e) {
-          log("Error " + id + ": " + e.message);
-        }
-      }
-    }
+    log("Todos los datos fueron enviados.");
 
-    document.getElementById("probar").disabled = false;
-    document.getElementById("identificar").disabled = false;
-    log("Diagnóstico listo.");
+    log("Esperando impresión...");
 
-  } catch (e) {
-    log("ERROR: " + e.message);
+  } catch (error) {
+
+    log("ERROR DE IMPRESIÓN: " + error.message);
+
+  } finally {
+
+    document.getElementById("imprimir").disabled = false;
   }
 };
 
-document.getElementById("probar").onclick =
-async () => {
-  const commands = [
-    ["ff02", [0x10, 0xFF, 0x20, 0xF0]],
-    ["ff12", [0x10, 0xFF, 0x20, 0xF0]],
-    ["ff11", [0x10, 0xFF, 0x20, 0xF0]]
-  ];
-
-  for (const [id, bytes] of commands) {
-    if (!characteristics[id]) continue;
-
-    try {
-      const ch = characteristics[id];
-      const data = new Uint8Array(bytes);
-
-      if (ch.properties.writeWithoutResponse) {
-        await ch.writeValueWithoutResponse(data);
-      } else if (ch.properties.write) {
-        await ch.writeValueWithResponse(data);
-      }
-
-      log("Enviado por " + id + ": " + bytes.join(","));
-
-      await new Promise(resolve => setTimeout(resolve, 1200));
-
-    } catch (e) {
-      log("Error enviando por " + id + ": " + e.message);
-    }
-  }
-
-  log("Pruebas terminadas.");
-};
-document.getElementById("identificar").onclick =
-async () => {
-
-  const commands = [
-    ["Firmware", [0x10, 0xFF, 0x20, 0xF1]],
-    ["Número de serie", [0x10, 0xFF, 0x20, 0xF2]],
-    ["Estado", [0x10, 0xFF, 0x40]]
-  ];
-
-  for (const [name, bytes] of commands) {
-    try {
-      await characteristics["ff02"].writeValueWithoutResponse(
-  new Uint8Array(bytes)
-);
-
-      log("Consulta enviada: " + name);
-
-      await new Promise(resolve =>
-        setTimeout(resolve, 1500)
-      );
-
-    } catch (error) {
-      log("Error: " + error.message);
-    }
-  }
-};
 </script>
 
 </body>
