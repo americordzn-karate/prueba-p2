@@ -152,9 +152,9 @@ async () => {
 
   for (const [name, bytes] of commands) {
     try {
-      await tx.writeValueWithoutResponse(
-        new Uint8Array(bytes)
-      );
+      await characteristics["ff02"].writeValueWithoutResponse(
+  new Uint8Array(bytes)
+);
 
       log("Consulta enviada: " + name);
 
