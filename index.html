@@ -4,87 +4,139 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prueba impresora P2</title>
+<title>Diagnóstico P2</title>
 </head>
 <body>
 
-<h2>Conexión impresora P2</h2>
+<h2>Diagnóstico Bluetooth P2</h2>
 
 <button id="conectar">Conectar P2</button>
-<button id="consultar" disabled>Consultar modelo</button>
+<button id="probar" disabled>Probar canales</button>
 
 <pre id="resultado">Esperando conexión...</pre>
 
 <script>
-const SERVICE = "0000ff00-0000-1000-8000-00805f9b34fb";
-const TX = "0000ff02-0000-1000-8000-00805f9b34fb";
-const RX = "0000ff01-0000-1000-8000-00805f9b34fb";
-
-let printer;
-let tx;
-let rx;
-
-const log = (msg) => {
-  document.getElementById("resultado").textContent +=
-    "\n" + msg;
+const UUID = {
+  ff00: "0000ff00-0000-1000-8000-00805f9b34fb",
+  ff01: "0000ff01-0000-1000-8000-00805f9b34fb",
+  ff02: "0000ff02-0000-1000-8000-00805f9b34fb",
+  ff03: "0000ff03-0000-1000-8000-00805f9b34fb",
+  ff10: "0000ff10-0000-1000-8000-00805f9b34fb",
+  ff11: "0000ff11-0000-1000-8000-00805f9b34fb",
+  ff12: "0000ff12-0000-1000-8000-00805f9b34fb"
 };
 
-document.getElementById("conectar").onclick = async () => {
-  try {
-    printer = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "P2" }],
-      optionalServices: [SERVICE]
-    });
+let services = {};
+let characteristics = {};
 
-    log("Dispositivo: " + printer.name);
+const output = document.getElementById("resultado");
 
-    const server = await printer.gatt.connect();
-    const service = await server.getPrimaryService(SERVICE);
+function log(message) {
+  output.textContent += "\n" + message;
+}
 
-    tx = await service.getCharacteristic(TX);
-    rx = await service.getCharacteristic(RX);
-
-    await rx.startNotifications();
-
-    rx.addEventListener("characteristicvaluechanged", (event) => {
+function listen(characteristic, name) {
+  characteristic.addEventListener(
+    "characteristicvaluechanged", event => {
+      const value = event.target.value;
       const data = new Uint8Array(
-        event.target.value.buffer,
-        event.target.value.byteOffset,
-        event.target.value.byteLength
+        value.buffer, value.byteOffset, value.byteLength
       );
 
-      const hex = Array.from(data)
+      const hex = [...data]
         .map(b => b.toString(16).padStart(2, "0"))
         .join(" ");
 
-      const ascii = new TextDecoder().decode(data);
+      log(name + " RECIBIDO: " + hex);
+    }
+  );
+}
 
-      log("Respuesta HEX: " + hex);
-      log("Respuesta texto: " + ascii);
+document.getElementById("conectar").onclick =
+async () => {
+  try {
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "P2" }],
+      optionalServices: [UUID.ff00, UUID.ff10]
     });
 
-    log("Conexión establecida correctamente.");
+    log("Dispositivo: " + device.name);
 
-    document.getElementById("consultar").disabled = false;
+    const server = await device.gatt.connect();
 
-  } catch (error) {
-    log("ERROR: " + error.message);
+    for (const [name, id] of [
+      ["ff00", UUID.ff00],
+      ["ff10", UUID.ff10]
+    ]) {
+      try {
+        services[name] = await server.getPrimaryService(id);
+        log("Servicio " + name + " conectado.");
+      } catch (e) {
+        log("Servicio " + name + ": " + e.message);
+      }
+    }
+
+    for (const [name, service, ids] of [
+      ["ff00", services.ff00, ["ff01", "ff02", "ff03"]],
+      ["ff10", services.ff10, ["ff11", "ff12"]]
+    ]) {
+      if (!service) continue;
+
+      for (const id of ids) {
+        try {
+          const ch = await service.getCharacteristic(UUID[id]);
+          characteristics[id] = ch;
+
+          if (["ff01", "ff03", "ff11", "ff12"].includes(id)) {
+            listen(ch, id);
+            await ch.startNotifications();
+            log("Notificaciones activadas: " + id);
+          }
+        } catch (e) {
+          log("Error " + id + ": " + e.message);
+        }
+      }
+    }
+
+    document.getElementById("probar").disabled = false;
+    log("Diagnóstico listo.");
+
+  } catch (e) {
+    log("ERROR: " + e.message);
   }
 };
 
-document.getElementById("consultar").onclick = async () => {
-  try {
-    const command = new Uint8Array([
-      0x10, 0xFF, 0x20, 0xF0
-    ]);
+document.getElementById("probar").onclick =
+async () => {
+  const commands = [
+    ["ff02", [0x10, 0xFF, 0x20, 0xF0]],
+    ["ff12", [0x10, 0xFF, 0x20, 0xF0]],
+    ["ff11", [0x10, 0xFF, 0x20, 0xF0]]
+  ];
 
-    await tx.writeValueWithoutResponse(command);
+  for (const [id, bytes] of commands) {
+    if (!characteristics[id]) continue;
 
-    log("Consulta enviada. Esperando respuesta...");
+    try {
+      const ch = characteristics[id];
+      const data = new Uint8Array(bytes);
 
-  } catch (error) {
-    log("ERROR: " + error.message);
+      if (ch.properties.writeWithoutResponse) {
+        await ch.writeValueWithoutResponse(data);
+      } else if (ch.properties.write) {
+        await ch.writeValueWithResponse(data);
+      }
+
+      log("Enviado por " + id + ": " + bytes.join(","));
+
+      await new Promise(resolve => setTimeout(resolve, 1200));
+
+    } catch (e) {
+      log("Error enviando por " + id + ": " + e.message);
+    }
   }
+
+  log("Pruebas terminadas.");
 };
 </script>
 
