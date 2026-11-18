@@ -4,45 +4,136 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Prueba ESC/POS P2</title>
+<title>Holyhah P2 - Impresión BLE</title>
 <style>
-body{font-family:Arial;background:#f2f2f2;padding:15px}
-main{max-width:500px;margin:auto;background:white;padding:20px;border-radius:12px}
-button{width:100%;padding:15px;margin:8px 0;background:#222;color:white;border:0;border-radius:8px;font-size:16px}
+body{font-family:Arial;background:#eee;padding:15px;margin:0}
+main{max-width:520px;margin:auto;background:white;padding:20px;border-radius:12px}
+button{width:100%;padding:15px;margin:8px 0;border:0;border-radius:8px;background:#222;color:white;font-size:16px}
 button:disabled{background:#999}
-#log{background:#111;color:#00ff90;padding:12px;font:12px monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+#status{padding:12px;background:#eee;margin:12px 0;border-radius:8px}
+#log{background:#111;color:#00ff90;padding:12px;font:12px monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:350px;overflow:auto}
+canvas{width:100%;border:1px solid #ccc}
 </style>
 </head>
 <body>
 <main>
-<h2>Prueba ESC/POS - Holyhah P2</h2>
+<h2>Holyhah P2 - Impresión directa</h2>
 <button id="connect">1. Conectar impresora</button>
-<button id="print" disabled>2. Imprimir prueba</button>
+<button id="print" disabled>2. Imprimir etiqueta de prueba</button>
 <button id="clear">Limpiar registro</button>
 <div id="status">Desconectado</div>
-<pre id="log"></pre>
+<h3>Vista previa (48 × 30 mm)</h3>
+<canvas id="preview" width="384" height="240"></canvas>
+<h3>Registro</h3>
+<div id="log"></div>
 </main>
 
 <script>
 const SERVICE="0000ff00-0000-1000-8000-00805f9b34fb";
-const TX="0000ff02-0000-1000-8000-00805f9b34fb";
+const TX_UUID="0000ff02-0000-1000-8000-00805f9b34fb";
+const RX_UUID="0000ff01-0000-1000-8000-00805f9b34fb";
 
-let device, tx;
+let device=null;
+let tx=null;
+let rx=null;
+let busy=false;
 
-const logBox=document.getElementById("log");
-const statusBox=document.getElementById("status");
-const connectBtn=document.getElementById("connect");
-const printBtn=document.getElementById("print");
+const $=id=>document.getElementById(id);
+const canvas=$("preview");
+const ctx=canvas.getContext("2d");
 
-function log(t){
-  logBox.textContent+="["+new Date().toLocaleTimeString()+"] "+t+"\n";
-  logBox.scrollTop=logBox.scrollHeight;
+function log(s){
+  $("log").textContent+="["+new Date().toLocaleTimeString()+"] "+s+"\n";
+  $("log").scrollTop=$("log").scrollHeight;
+}
+function status(s){$("status").textContent=s;}
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+function hex(a){return [...a].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(" ");}
+
+function drawLabel(){
+  ctx.fillStyle="#fff";
+  ctx.fillRect(0,0,384,240);
+  ctx.fillStyle="#000";
+  ctx.textAlign="center";
+  ctx.font="bold 34px Arial";
+  ctx.fillText("PRUEBA P2",192,55);
+  ctx.font="bold 25px Arial";
+  ctx.fillText("SENSHI-KAN",192,105);
+  ctx.font="20px Arial";
+  ctx.fillText("Bluetooth BLE",192,150);
+  ctx.font="bold 23px Arial";
+  ctx.fillText("48 x 30 mm",192,195);
+  ctx.strokeStyle="#000";
+  ctx.lineWidth=3;
+  ctx.strokeRect(4,4,376,232);
+}
+
+function rasterize(){
+  const w=384,h=240;
+  const img=ctx.getImageData(0,0,w,h);
+  const wb=48;
+  const out=new Uint8Array(wb*h);
+
+  for(let y=0;y<h;y++){
+    for(let x=0;x<w;x++){
+      const p=(y*w+x)*4;
+      const gray=(img.data[p]+img.data[p+1]+img.data[p+2])/3;
+      if(gray<128){
+        out[y*wb+(x>>3)]|=0x80>>(x&7);
+      }
+    }
+  }
+  return out;
+}
+
+function makeRaster(data){
+  const header=new Uint8Array([
+    0x1D,0x76,0x30,0x00,
+    0x30,0x00,
+    0xF0,0x00
+  ]);
+  const result=new Uint8Array(header.length+data.length);
+  result.set(header,0);
+  result.set(data,header.length);
+  return result;
+}
+
+async function write(data){
+  const a=data instanceof Uint8Array?data:new Uint8Array(data);
+  if(tx.properties.writeWithoutResponse){
+    await tx.writeValueWithoutResponse(a);
+  }else{
+    await tx.writeValueWithResponse(a);
+  }
+}
+
+async function sendStream(data){
+  const chunkSize=100;
+  log("Enviando raster: "+data.length+" bytes");
+
+  for(let i=0;i<data.length;i+=chunkSize){
+    const chunk=data.slice(i,i+chunkSize);
+    await write(chunk);
+    if(i===0 || i+chunkSize>=data.length || i%1000===0){
+      log("Enviado "+Math.min(i+chunk.length,data.length)+"/"+data.length);
+    }
+    await sleep(50);
+  }
+}
+
+function onNotify(event){
+  const data=new Uint8Array(
+    event.target.value.buffer,
+    event.target.value.byteOffset,
+    event.target.value.byteLength
+  );
+  log("FF01: "+hex(data));
 }
 
 async function connect(){
   try{
-    connectBtn.disabled=true;
-    statusBox.textContent="Buscando impresora...";
+    $("connect").disabled=true;
+    status("Buscando impresora...");
 
     device=await navigator.bluetooth.requestDevice({
       filters:[{namePrefix:"P2"}],
@@ -52,71 +143,106 @@ async function connect(){
     log("Dispositivo: "+device.name);
 
     device.addEventListener("gattserverdisconnected",()=>{
-      statusBox.textContent="Desconectado";
-      printBtn.disabled=true;
-      connectBtn.disabled=false;
       tx=null;
+      rx=null;
+      $("print").disabled=true;
+      $("connect").disabled=false;
+      status("Desconectado");
+      log("Bluetooth desconectado");
     });
 
     const server=await device.gatt.connect();
     const service=await server.getPrimaryService(SERVICE);
-    tx=await service.getCharacteristic(TX);
 
-    statusBox.textContent="Conectado";
-    printBtn.disabled=false;
-    log("Conexión establecida.");
+    tx=await service.getCharacteristic(TX_UUID);
+    rx=await service.getCharacteristic(RX_UUID);
+
+    await rx.startNotifications();
+    rx.addEventListener("characteristicvaluechanged",onNotify);
+
+    status("Conectado a "+device.name);
+    log("Conexión lista. FF02 escritura, FF01 recepción.");
+
+    $("print").disabled=false;
 
   }catch(e){
     log("ERROR: "+e.message);
-    statusBox.textContent="Error de conexión";
-    connectBtn.disabled=false;
+    status("Error de conexión");
+    $("connect").disabled=false;
   }
 }
 
-async function send(data){
-  if(tx.properties.writeWithoutResponse){
-    await tx.writeValueWithoutResponse(data);
-  }else{
-    await tx.writeValueWithResponse(data);
-  }
-}
+async function printLabel(){
+  if(busy || !tx || !device?.gatt?.connected)return;
 
-async function printTest(){
+  busy=true;
+  $("print").disabled=true;
+
   try{
-    printBtn.disabled=true;
-    log("Enviando prueba ESC/POS...");
+    drawLabel();
 
-    // Inicialización ESC/POS
-    await send(new Uint8Array([0x1B,0x40]));
-    await new Promise(r=>setTimeout(r,200));
+    log("INICIO DE IMPRESIÓN");
+    status("Inicializando impresora...");
 
-    // Texto ASCII
-    const text=new TextEncoder().encode("ESC/POS TEST");
-    await send(text);
-    await new Promise(r=>setTimeout(r,200));
+    // 1. Activar modo de impresora LuckPrinter
+    await write(new Uint8Array([0x10,0xFF,0xF1,0x03]));
+    await sleep(250);
 
-    // Salto de línea
-    await send(new Uint8Array([0x0A]));
+    // 2. Despertar impresora: 12 bytes cero
+    await write(new Uint8Array(12));
+    await sleep(250);
 
-    log("Datos enviados.");
+    // 3. Ajuste de posición para primera etiqueta
+    await write(new Uint8Array([0x1F,0x11,0x51]));
+    await sleep(150);
+
+    // 4. Raster ESC/POS sin compresión
+    const bitmap=rasterize();
+    const raster=makeRaster(bitmap);
+
+    log("Imagen: 384 x 240 px");
+    log("Datos de imagen: "+bitmap.length+" bytes");
+    log("Cabecera raster: "+hex(raster.slice(0,8)));
+
+    status("Transmitiendo imagen...");
+    await sendStream(raster);
+
+    await sleep(300);
+
+    // 5. Posicionar a la siguiente etiqueta
+    status("Finalizando etiqueta...");
+    await write(new Uint8Array([0x1D,0x0C]));
+    await sleep(300);
+
+    // 6. Ajuste final de posición
+    await write(new Uint8Array([0x1F,0x11,0x50]));
+    await sleep(200);
+
+    // 7. Cerrar trabajo
+    await write(new Uint8Array([0x10,0xFF,0xF1,0x45]));
+
+    log("Secuencia enviada.");
+    log("Esperando respuesta de impresora...");
+    status("Trabajo enviado. Verifique impresión.");
 
   }catch(e){
     log("ERROR: "+e.message);
+    status("Error de impresión");
   }finally{
-    printBtn.disabled=!tx;
+    busy=false;
+    $("print").disabled=!device?.gatt?.connected;
   }
 }
 
-connectBtn.onclick=connect;
-printBtn.onclick=printTest;
+$("connect").addEventListener("click",connect);
+$("print").addEventListener("click",printLabel);
+$("clear").addEventListener("click",()=>{$("log").textContent="";});
 
-document.getElementById("clear").onclick=()=>{
-  logBox.textContent="";
-};
+drawLabel();
 
 if(!navigator.bluetooth){
-  statusBox.textContent="Abra esta página en Chrome Android";
-  connectBtn.disabled=true;
+  status("Abra esta página en Chrome Android");
+  $("connect").disabled=true;
 }
 </script>
 </body>
