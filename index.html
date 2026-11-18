@@ -3,569 +3,121 @@
 <html lang="es">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Prueba Holyhah P2 - YXQ</title>
-
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prueba ESC/POS P2</title>
 <style>
-body {
-  font-family: Arial, sans-serif;
-  background: #f2f2f2;
-  padding: 15px;
-  margin: 0;
-  color: #222;
-}
-.contenedor {
-  max-width: 520px;
-  margin: auto;
-  background: white;
-  padding: 20px;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px #0002;
-}
-button {
-  width: 100%;
-  padding: 14px;
-  margin: 8px 0;
-  border: none;
-  border-radius: 8px;
-  background: #222;
-  color: white;
-  font-size: 16px;
-}
-button:disabled {
-  background: #999;
-}
-#estado {
-  background: #eee;
-  padding: 12px;
-  border-radius: 8px;
-  margin: 12px 0;
-}
-#log {
-  background: #111;
-  color: #00ff90;
-  padding: 12px;
-  font-family: monospace;
-  font-size: 12px;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-height: 350px;
-  overflow-y: auto;
-}
-canvas {
-  width: 100%;
-  border: 1px solid #ddd;
-  margin-top: 10px;
-}
+body{font-family:Arial;background:#f2f2f2;padding:15px}
+main{max-width:500px;margin:auto;background:white;padding:20px;border-radius:12px}
+button{width:100%;padding:15px;margin:8px 0;background:#222;color:white;border:0;border-radius:8px;font-size:16px}
+button:disabled{background:#999}
+#log{background:#111;color:#00ff90;padding:12px;font:12px monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 </style>
 </head>
-
 <body>
-
-<div class="contenedor">
-
-<h2>Holyhah P2 - Prueba YXQ</h2>
-
-<p>
-Prueba experimental de impresión directa Bluetooth BLE.
-Protocolo candidato YXQ ID 3.
-</p>
-
-<button id="btnConectar">1. Conectar impresora</button>
-<button id="btnImprimir" disabled>2. Imprimir etiqueta de prueba</button>
-<button id="btnLimpiar">Limpiar registro</button>
-
-<div id="estado">Estado: desconectado</div>
-
-<h3>Vista previa de etiqueta</h3>
-<canvas id="preview" width="384" height="240"></canvas>
-
-<h3>Registro Bluetooth</h3>
-<div id="log"></div>
-
-</div>
-
-<!-- Librería de compresión ZLIB -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<main>
+<h2>Prueba ESC/POS - Holyhah P2</h2>
+<button id="connect">1. Conectar impresora</button>
+<button id="print" disabled>2. Imprimir prueba</button>
+<button id="clear">Limpiar registro</button>
+<div id="status">Desconectado</div>
+<pre id="log"></pre>
+</main>
 
 <script>
-const SERVICE_FF00 =
-  "0000ff00-0000-1000-8000-00805f9b34fb";
+const SERVICE="0000ff00-0000-1000-8000-00805f9b34fb";
+const TX="0000ff02-0000-1000-8000-00805f9b34fb";
 
-const TX_FF02 =
-  "0000ff02-0000-1000-8000-00805f9b34fb";
+let device, tx;
 
-const RX_FF01 =
-  "0000ff01-0000-1000-8000-00805f9b34fb";
+const logBox=document.getElementById("log");
+const statusBox=document.getElementById("status");
+const connectBtn=document.getElementById("connect");
+const printBtn=document.getElementById("print");
 
-const RX_FF03 =
-  "0000ff03-0000-1000-8000-00805f9b34fb";
-
-let device = null;
-let server = null;
-let service = null;
-
-let tx = null;
-let rx = null;
-let flow = null;
-
-let credits = 0;
-let mtu = 95;
-
-let creditWaiters = [];
-
-const btnConnect = document.getElementById("btnConectar");
-const btnPrint = document.getElementById("btnImprimir");
-const btnClear = document.getElementById("btnLimpiar");
-const statusBox = document.getElementById("estado");
-const logBox = document.getElementById("log");
-
-const canvas = document.getElementById("preview");
-const ctx = canvas.getContext("2d");
-
-
-function log(message) {
-  logBox.textContent +=
-    "[" + new Date().toLocaleTimeString() + "] " +
-    message + "\n";
-
-  logBox.scrollTop = logBox.scrollHeight;
+function log(t){
+  logBox.textContent+="["+new Date().toLocaleTimeString()+"] "+t+"\n";
+  logBox.scrollTop=logBox.scrollHeight;
 }
 
+async function connect(){
+  try{
+    connectBtn.disabled=true;
+    statusBox.textContent="Buscando impresora...";
 
-function status(message) {
-  statusBox.textContent = "Estado: " + message;
-}
-
-
-function hex(data) {
-  return Array.from(data)
-    .map(b => b.toString(16).padStart(2, "0").toUpperCase())
-    .join(" ");
-}
-
-
-function wait(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-
-function concat(...arrays) {
-  const total = arrays.reduce((n, a) => n + a.length, 0);
-  const result = new Uint8Array(total);
-
-  let offset = 0;
-
-  for (const a of arrays) {
-    result.set(a, offset);
-    offset += a.length;
-  }
-
-  return result;
-}
-
-
-function bytes(...values) {
-  return new Uint8Array(values);
-}
-
-
-// =====================================================
-// RECEPCIÓN FF01
-// =====================================================
-
-function onFF01(event) {
-  const data = new Uint8Array(event.target.value.buffer);
-  log("FF01: " + hex(data));
-}
-
-
-// =====================================================
-// CONTROL DE FLUJO FF03
-// =====================================================
-
-function onFF03(event) {
-  const data = new Uint8Array(event.target.value.buffer);
-
-  log("FF03: " + hex(data));
-
-  if (data.length >= 2 && data[0] === 0x01) {
-    credits += data[1];
-
-    log("Créditos: " + credits);
-
-    while (creditWaiters.length > 0 && credits > 0) {
-      credits--;
-
-      const waiter = creditWaiters.shift();
-      waiter();
-    }
-  }
-
-  if (data.length >= 3 && data[0] === 0x02) {
-    mtu = data[1] | (data[2] << 8);
-
-    log("MTU reportado: " + mtu);
-  }
-}
-
-
-function waitCredit(timeout = 8000) {
-  if (credits > 0) {
-    credits--;
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      const index = creditWaiters.indexOf(done);
-
-      if (index !== -1) {
-        creditWaiters.splice(index, 1);
-      }
-
-      reject(new Error("Tiempo agotado esperando crédito FF03"));
-    }, timeout);
-
-    function done() {
-      clearTimeout(timer);
-      resolve();
-    }
-
-    creditWaiters.push(done);
-  });
-}
-
-
-// =====================================================
-// CONEXIÓN
-// =====================================================
-
-async function connectPrinter() {
-  try {
-    btnConnect.disabled = true;
-    status("buscando impresora...");
-
-    log("Buscando impresora BLE...");
-
-    device = await navigator.bluetooth.requestDevice({
-      filters: [{ namePrefix: "P2" }],
-      optionalServices: [SERVICE_FF00]
+    device=await navigator.bluetooth.requestDevice({
+      filters:[{namePrefix:"P2"}],
+      optionalServices:[SERVICE]
     });
 
-    log("Dispositivo: " + device.name);
+    log("Dispositivo: "+device.name);
 
-    device.addEventListener("gattserverdisconnected", () => {
-      log("Bluetooth desconectado.");
-
-      status("desconectado");
-      btnPrint.disabled = true;
-      btnConnect.disabled = false;
-
-      tx = null;
-      rx = null;
-      flow = null;
-      credits = 0;
+    device.addEventListener("gattserverdisconnected",()=>{
+      statusBox.textContent="Desconectado";
+      printBtn.disabled=true;
+      connectBtn.disabled=false;
+      tx=null;
     });
 
-    server = await device.gatt.connect();
+    const server=await device.gatt.connect();
+    const service=await server.getPrimaryService(SERVICE);
+    tx=await service.getCharacteristic(TX);
 
-    log("GATT conectado.");
+    statusBox.textContent="Conectado";
+    printBtn.disabled=false;
+    log("Conexión establecida.");
 
-    service = await server.getPrimaryService(SERVICE_FF00);
-
-    tx = await service.getCharacteristic(TX_FF02);
-    rx = await service.getCharacteristic(RX_FF01);
-    flow = await service.getCharacteristic(RX_FF03);
-
-    log("FF02 escritura disponible.");
-    log("FF01 recepción disponible.");
-    log("FF03 control de flujo disponible.");
-
-    await rx.startNotifications();
-    rx.addEventListener("characteristicvaluechanged", onFF01);
-
-    await flow.startNotifications();
-    flow.addEventListener("characteristicvaluechanged", onFF03);
-
-    log("Notificaciones activadas.");
-
-    status("conectado");
-    btnPrint.disabled = false;
-
-  } catch (e) {
-    log("ERROR: " + e.message);
-    status("error de conexión");
-    btnConnect.disabled = false;
+  }catch(e){
+    log("ERROR: "+e.message);
+    statusBox.textContent="Error de conexión";
+    connectBtn.disabled=false;
   }
 }
 
-
-// =====================================================
-// ENVÍO BLE
-// =====================================================
-
-async function writePacket(data) {
-  if (!tx) throw new Error("Impresora no conectada");
-
-  if (tx.properties.writeWithoutResponse) {
+async function send(data){
+  if(tx.properties.writeWithoutResponse){
     await tx.writeValueWithoutResponse(data);
-  } else {
+  }else{
     await tx.writeValueWithResponse(data);
   }
 }
 
-
-async function sendStream(data) {
-  /*
-    Protocolo experimental:
-    paquetes de hasta 95 bytes,
-    esperando crédito FF03,
-    pausa de 30 ms entre paquetes.
-  */
-
-  const packetSize = 95;
-
-  log("Total de bytes a transmitir: " + data.length);
-
-  for (let i = 0; i < data.length; i += packetSize) {
-    const packet = data.slice(i, i + packetSize);
-
-    await waitCredit();
-
-    await writePacket(packet);
-
-    log(
-      "Paquete enviado: " +
-      Math.min(i + packet.length, data.length) +
-      " / " + data.length
-    );
-
-    await wait(30);
-  }
-
-  log("Transmisión completa.");
-}
-
-
-// =====================================================
-// GENERACIÓN DE ETIQUETA
-// 384 x 240 px
-// =====================================================
-
-function createLabel() {
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, 384, 240);
-
-  ctx.fillStyle = "#000000";
-
-  ctx.textAlign = "center";
-
-  ctx.font = "bold 32px Arial";
-  ctx.fillText("PRUEBA P2", 192, 55);
-
-  ctx.font = "bold 24px Arial";
-  ctx.fillText("Bluetooth BLE", 192, 100);
-
-  ctx.font = "20px Arial";
-  ctx.fillText("Holyhah 203 DPI", 192, 145);
-
-  ctx.font = "bold 24px Arial";
-  ctx.fillText("YXQ ID 3", 192, 190);
-
-  ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(5, 5, 374, 230);
-}
-
-
-// =====================================================
-// CONVERSIÓN A BITMAP 1 BIT
-// 1 = NEGRO
-// =====================================================
-
-function canvasToRaster() {
-  const image = ctx.getImageData(
-    0, 0, canvas.width, canvas.height
-  );
-
-  const width = canvas.width;
-  const height = canvas.height;
-  const widthBytes = Math.ceil(width / 8);
-
-  const raster = new Uint8Array(widthBytes * height);
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const index = (y * width + x) * 4;
-
-      const r = image.data[index];
-      const g = image.data[index + 1];
-      const b = image.data[index + 2];
-
-      const gray = (r + g + b) / 3;
-
-      if (gray < 128) {
-        const byteIndex = y * widthBytes + Math.floor(x / 8);
-        const bit = 7 - (x % 8);
-
-        raster[byteIndex] |= (1 << bit);
-      }
-    }
-  }
-
-  return {
-    raster,
-    widthBytes,
-    height
-  };
-}
-
-
-// =====================================================
-// BLOQUE RASTER YXQ 1F 10
-// =====================================================
-
-function makeRasterBlock(rasterData) {
-  const compressed = pako.deflate(rasterData.raster, {
-    level: 6,
-    windowBits: 10
-  });
-
-  const header = new Uint8Array(10);
-
-  header[0] = 0x1F;
-  header[1] = 0x10;
-
-  // widthBytes BIG ENDIAN
-  header[2] = (rasterData.widthBytes >> 8) & 0xFF;
-  header[3] = rasterData.widthBytes & 0xFF;
-
-  // height BIG ENDIAN
-  header[4] = (rasterData.height >> 8) & 0xFF;
-  header[5] = rasterData.height & 0xFF;
-
-  // compressed length BIG ENDIAN
-  header[6] = (compressed.length >> 24) & 0xFF;
-  header[7] = (compressed.length >> 16) & 0xFF;
-  header[8] = (compressed.length >> 8) & 0xFF;
-  header[9] = compressed.length & 0xFF;
-
-  log("Raster: " + rasterData.widthBytes + " bytes x " + rasterData.height);
-  log("Compresión ZLIB: " + compressed.length + " bytes");
-
-  return concat(header, compressed);
-}
-
-
-// =====================================================
-// CONSTRUCCIÓN DEL TRABAJO YXQ ID 3
-// =====================================================
-
-function buildJob(rasterBlock) {
-  const parts = [];
-
-  // Papel con separación / gap
-  parts.push(bytes(0x1F, 0x80, 0x02, 0x20));
-
-  // Densidad normal
-  parts.push(bytes(0x1F, 0x70, 0x02, 0x0A));
-
-  // Wakeup: 6 bytes
-  parts.push(new Uint8Array(6));
-
-  // Abrir sesión
-  parts.push(bytes(0x1F, 0xC0, 0x01, 0x00));
-
-  // Avanzar a la separación
-  parts.push(bytes(0x1F, 0x11, 0x51));
-
-  // Raster
-  parts.push(rasterBlock);
-
-  // Posicionamiento posterior
-  parts.push(bytes(0x1F, 0x12, 0x20, 0x00));
-
-  // Cerrar sesión
-  parts.push(bytes(0x1F, 0xC0, 0x01, 0x01));
-
-  // Posicionar etiqueta
-  parts.push(bytes(0x1F, 0x11, 0x50));
-
-  return concat(...parts);
-}
-
-
-// =====================================================
-// IMPRESIÓN
-// =====================================================
-
-async function printTest() {
-  try {
-    if (!device || !device.gatt.connected) {
-      throw new Error("No existe conexión Bluetooth activa.");
-    }
-
-    if (!window.pako) {
-      throw new Error("No se cargó la librería de compresión.");
-    }
-
-    btnPrint.disabled = true;
-
-    status("preparando etiqueta...");
-    log("--------------------------------");
-    log("INICIO PRUEBA YXQ ID 3");
-    log("--------------------------------");
-
-    createLabel();
-
-    const rasterData = canvasToRaster();
-    const rasterBlock = makeRasterBlock(rasterData);
-    const job = buildJob(rasterBlock);
-
-    log("Trabajo total: " + job.length + " bytes");
-    log("Contenido inicial: " + hex(job.slice(0, 30)));
-
-    status("transmitiendo...");
-
-    await sendStream(job);
-
-    status("datos enviados");
-    log("Trabajo enviado. No se ha confirmado impresión.");
-
-  } catch (e) {
-    log("ERROR DE IMPRESIÓN: " + e.message);
-    status("error");
-  } finally {
-    btnPrint.disabled = !device || !device.gatt.connected;
+async function printTest(){
+  try{
+    printBtn.disabled=true;
+    log("Enviando prueba ESC/POS...");
+
+    // Inicialización ESC/POS
+    await send(new Uint8Array([0x1B,0x40]));
+    await new Promise(r=>setTimeout(r,200));
+
+    // Texto ASCII
+    const text=new TextEncoder().encode("ESC/POS TEST");
+    await send(text);
+    await new Promise(r=>setTimeout(r,200));
+
+    // Salto de línea
+    await send(new Uint8Array([0x0A]));
+
+    log("Datos enviados.");
+
+  }catch(e){
+    log("ERROR: "+e.message);
+  }finally{
+    printBtn.disabled=!tx;
   }
 }
 
+connectBtn.onclick=connect;
+printBtn.onclick=printTest;
 
-// =====================================================
-// BOTONES
-// =====================================================
+document.getElementById("clear").onclick=()=>{
+  logBox.textContent="";
+};
 
-btnConnect.addEventListener("click", connectPrinter);
-btnPrint.addEventListener("click", printTest);
-
-btnClear.addEventListener("click", () => {
-  logBox.textContent = "";
-});
-
-
-// =====================================================
-// INICIO
-// =====================================================
-
-createLabel();
-
-if (!navigator.bluetooth) {
-  status("Web Bluetooth no disponible. Utilice Chrome en Android.");
-  btnConnect.disabled = true;
+if(!navigator.bluetooth){
+  statusBox.textContent="Abra esta página en Chrome Android";
+  connectBtn.disabled=true;
 }
-
 </script>
-
 </body>
 </html>
