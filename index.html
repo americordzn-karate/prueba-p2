@@ -1,249 +1,389 @@
-
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Holyhah P2 - Impresión BLE</title>
+<title>Holyhah P2 - Impresión BLE (protocolo DothanTech / WePrint)</title>
 <style>
-body{font-family:Arial;background:#eee;padding:15px;margin:0}
-main{max-width:520px;margin:auto;background:white;padding:20px;border-radius:12px}
-button{width:100%;padding:15px;margin:8px 0;border:0;border-radius:8px;background:#222;color:white;font-size:16px}
-button:disabled{background:#999}
-#status{padding:12px;background:#eee;margin:12px 0;border-radius:8px}
-#log{background:#111;color:#00ff90;padding:12px;font:12px monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:350px;overflow:auto}
-canvas{width:100%;border:1px solid #ccc}
+*{box-sizing:border-box}
+body{font-family:Arial,sans-serif;background:#eee;padding:12px;margin:0;color:#111}
+main{max-width:540px;margin:auto;background:#fff;padding:18px;border-radius:12px}
+h2{margin:0 0 4px}h3{margin:18px 0 6px;font-size:15px}
+.sub{font-size:12px;color:#555;margin:0 0 10px}
+button{width:100%;padding:14px;margin:6px 0;border:0;border-radius:8px;background:#222;color:#fff;font-size:16px}
+button.sec{background:#555;font-size:14px;padding:11px}
+button:disabled{background:#aaa}
+#status{padding:12px;background:#eee;margin:10px 0;border-radius:8px;font-weight:bold}
+#status.ok{background:#d9f5df}#status.err{background:#fbdcdc}
+canvas{width:100%;border:1px solid #ccc;background:#fff;image-rendering:pixelated}
+label{display:block;font-size:13px;margin:8px 0 2px}
+input[type=text],input[type=number],select{width:100%;padding:9px;font-size:15px;border:1px solid #bbb;border-radius:6px}
+input[type=range]{width:100%}
+.row{display:flex;gap:8px}.row>div{flex:1}
+details{margin:10px 0;border:1px solid #ddd;border-radius:8px;padding:8px 10px}
+summary{cursor:pointer;font-weight:bold;font-size:14px}
+#log{background:#111;color:#00ff90;padding:10px;font:12px monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:320px;overflow:auto;border-radius:6px}
+.chk{display:flex;gap:8px;align-items:center;font-size:13px;margin:8px 0}
+.chk input{width:auto}
 </style>
 </head>
 <body>
 <main>
-<h2>Holyhah P2 - Impresión directa</h2>
+<h2>Holyhah P2 · impresión directa</h2>
+<p class="sub">Protocolo LPAPI de DothanTech (el que usa WePrint): tramas <code>1F cmd</code> con control de flujo por créditos (FF03).</p>
+
 <button id="connect">1. Conectar impresora</button>
-<button id="print" disabled>2. Imprimir etiqueta de prueba</button>
-<button id="clear">Limpiar registro</button>
+<button id="probe" class="sec" disabled>2. Identificar impresora (no imprime ni avanza papel)</button>
+<button id="print" disabled>3. Imprimir etiqueta</button>
 <div id="status">Desconectado</div>
-<h3>Vista previa (48 × 30 mm)</h3>
+
+<h3>Diseño de la etiqueta</h3>
+<label>Línea 1 (grande)</label><input type="text" id="t1" value="PRUEBA P2">
+<label>Línea 2</label><input type="text" id="t2" value="SENSHI-KAN">
+<label>Línea 3</label><input type="text" id="t3" value="Bluetooth BLE">
+<label>Imagen (opcional, sustituye al texto)</label><input type="file" id="img" accept="image/*">
+<h3>Vista previa (<span id="dim">384 × 240 px</span>)</h3>
 <canvas id="preview" width="384" height="240"></canvas>
+
+<details>
+<summary>Ajustes de papel e impresión</summary>
+<div class="row">
+  <div><label>Alto de etiqueta (mm)</label><input type="number" id="hmm" value="30" min="10" max="100" step="0.5"></div>
+  <div><label>Copias</label><input type="number" id="copies" value="1" min="1" max="20"></div>
+</div>
+<div class="row">
+  <div><label>Detección de etiqueta</label>
+    <select id="gap"><option value="2" selected>Con espacio (gap)</option><option value="3">Marca negra</option><option value="0">Papel continuo</option></select></div>
+  <div><label>Longitud del gap (mm)</label><input type="number" id="gaplen" value="3" min="1" max="10" step="0.5"></div>
+</div>
+<div class="row">
+  <div><label>Densidad</label>
+    <select id="dens"><option value="4">Baja</option><option value="6" selected>Normal</option><option value="10">Alta</option><option value="15">Máxima</option></select></div>
+  <div><label>Umbral B/N (0-255)</label><input type="number" id="thr" value="128" min="1" max="254"></div>
+</div>
+<label>Desplazamiento horizontal: <b id="oxv">0</b> px (centrar el diseño)</label>
+<input type="range" id="ox" min="-60" max="60" value="0">
+<div class="chk"><input type="checkbox" id="force"><span>Imprimir aunque la impresora no responda al protocolo (no recomendado: puede avanzar etiquetas en blanco)</span></div>
+</details>
+
+<button id="clear" class="sec">Limpiar registro</button>
+<button id="copy" class="sec">Copiar registro</button>
 <h3>Registro</h3>
 <div id="log"></div>
 </main>
 
 <script>
-const SERVICE="0000ff00-0000-1000-8000-00805f9b34fb";
-const TX_UUID="0000ff02-0000-1000-8000-00805f9b34fb";
-const RX_UUID="0000ff01-0000-1000-8000-00805f9b34fb";
+"use strict";
+/* ================= UUIDs ================= */
+const U = h => "0000" + h + "-0000-1000-8000-00805f9b34fb";
+const SERVICE = U("ff00"), WRITE_UUID = U("ff02"), DATA_UUID = U("ff01"), FC_UUID = U("ff03");
 
-let device=null;
-let tx=null;
-let rx=null;
-let busy=false;
+/* ================= Protocolo LPAPI (DothanTech) ================= */
+const LP = {
+  START: 0x1F, CRC: 0x88,
+  PAGE_START: 32, PAGE_WIDTH: 39, BITMAP: 43, REPEAT: 46,
+  GAP_TYPE: 66, DARKNESS: 67, GAP_LEN: 69,
+  IS_PRINTABLE: 112, DPI: 113, WIDTH: 114, MANUF: 117, BUF_SIZE: 119,
+  DEV_NAME: 121, DEV_VER: 122, SW_VER: 124
+};
+const ebv = n => n >= 192 ? [(n >> 8) | 192, n & 255] : [n];
+function frame(cmd, data = []) { return [LP.START, cmd, ...ebv(data.length), ...data, LP.CRC]; }
+function bitmapRow(bytes) { return [LP.START, LP.BITMAP, ...ebv(0), ...ebv(bytes.length), ...bytes]; }
+function bitmapRepeat(extra) { return [LP.START, LP.REPEAT, ...ebv(extra - 1)]; }   // repite la fila anterior "extra" veces
+function blankLines(n) { const o = []; while (n >= 255) { o.push(27, 74, 255); n -= 255; } if (n > 0) o.push(27, 74, n); return o; }
 
-const $=id=>document.getElementById(id);
-const canvas=$("preview");
-const ctx=canvas.getContext("2d");
-
-function log(s){
-  $("log").textContent+="["+new Date().toLocaleTimeString()+"] "+s+"\n";
-  $("log").scrollTop=$("log").scrollHeight;
-}
-function status(s){$("status").textContent=s;}
-function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
-function hex(a){return [...a].map(x=>x.toString(16).padStart(2,"0").toUpperCase()).join(" ");}
-
-function drawLabel(){
-  ctx.fillStyle="#fff";
-  ctx.fillRect(0,0,384,240);
-  ctx.fillStyle="#000";
-  ctx.textAlign="center";
-  ctx.font="bold 34px Arial";
-  ctx.fillText("PRUEBA P2",192,55);
-  ctx.font="bold 25px Arial";
-  ctx.fillText("SENSHI-KAN",192,105);
-  ctx.font="20px Arial";
-  ctx.fillText("Bluetooth BLE",192,150);
-  ctx.font="bold 23px Arial";
-  ctx.fillText("48 x 30 mm",192,195);
-  ctx.strokeStyle="#000";
-  ctx.lineWidth=3;
-  ctx.strokeRect(4,4,376,232);
-}
-
-function rasterize(){
-  const w=384,h=240;
-  const img=ctx.getImageData(0,0,w,h);
-  const wb=48;
-  const out=new Uint8Array(wb*h);
-
-  for(let y=0;y<h;y++){
-    for(let x=0;x<w;x++){
-      const p=(y*w+x)*4;
-      const gray=(img.data[p]+img.data[p+1]+img.data[p+2])/3;
-      if(gray<128){
-        out[y*wb+(x>>3)]|=0x80>>(x&7);
-      }
-    }
+function encodeRows(rows) {
+  const out = []; let i = 0;
+  while (i < rows.length) {
+    const r = rows[i]; let nz = r.length;
+    while (nz > 0 && r[nz - 1] === 0) nz--;
+    if (nz === 0) { let n = 0; while (i < rows.length && rows[i].every(b => b === 0)) { n++; i++; } out.push(...blankLines(n)); continue; }
+    let rep = 1;
+    while (i + rep < rows.length && rows[i + rep].length === r.length && rows[i + rep].every((b, k) => b === r[k])) rep++;
+    out.push(...bitmapRow(r.slice(0, nz)));
+    if (rep > 1) { let extra = rep - 1; while (extra > 0) { const c = Math.min(extra, 16000); out.push(...bitmapRepeat(c)); extra -= c; } }
+    i += rep;
   }
   return out;
 }
 
-function makeRaster(data){
-  const header=new Uint8Array([
-    0x1D,0x76,0x30,0x00,
-    0x30,0x00,
-    0xF0,0x00
-  ]);
-  const result=new Uint8Array(header.length+data.length);
-  result.set(header,0);
-  result.set(data,header.length);
-  return result;
+function buildPage({ rows, byteWidth, pageKey, gapType, gapLenMM, darkness }) {
+  const out = [];
+  out.push(...frame(LP.PAGE_START, [(pageKey >> 8) & 255, pageKey & 255]));
+  out.push(...frame(LP.PAGE_WIDTH, ebv(byteWidth)));
+  if (gapType >= 0 && gapType <= 4) out.push(...frame(LP.GAP_TYPE, [gapType]));
+  if (gapType > 0 && gapLenMM > 0) out.push(...frame(LP.GAP_LEN, ebv(Math.round(gapLenMM * 100))));
+  if (darkness >= 1 && darkness <= 15) out.push(...frame(LP.DARKNESS, [darkness - 1]));
+  out.push(...encodeRows(rows));
+  out.push(0x0C);                       // fin de página (avanza hasta el siguiente gap)
+  return Uint8Array.from(out);
 }
 
-async function write(data){
-  const a=data instanceof Uint8Array?data:new Uint8Array(data);
-  if(tx.properties.writeWithoutResponse){
-    await tx.writeValueWithoutResponse(a);
-  }else{
-    await tx.writeValueWithResponse(a);
+function parsePackages(buf) {           // tramas dispositivo -> host
+  const pk = []; let i = 0;
+  for (;;) {
+    while (i < buf.length && buf[i] !== LP.START) i++;
+    if (i >= buf.length) return { pk, rest: [] };
+    const r = buf.slice(i); if (r.length < 4) return { pk, rest: r };
+    let len, hl; if (r[2] >= 192) { len = ((r[2] & 0x3F) << 8) | r[3]; hl = 4; } else { len = r[2]; hl = 3; }
+    if (r.length < hl + len + 1) return { pk, rest: r };
+    pk.push({ cmd: r[1], data: r.slice(hl, hl + len) }); i += hl + len + 1;
   }
 }
 
-async function sendStream(data){
-  const chunkSize=100;
-  log("Enviando raster: "+data.length+" bytes");
+/* ================= Utilidades ================= */
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const hex = a => [...a].map(x => x.toString(16).padStart(2, "0").toUpperCase()).join(" ");
+const ascii = a => String.fromCharCode(...a.filter(c => c >= 32 && c < 127));
+function log(s) { const l = $("log"); l.textContent += "[" + new Date().toLocaleTimeString() + "] " + s + "\n"; l.scrollTop = l.scrollHeight; }
+function status(s, cls = "") { const e = $("status"); e.textContent = s; e.className = cls; }
 
-  for(let i=0;i<data.length;i+=chunkSize){
-    const chunk=data.slice(i,i+chunkSize);
-    await write(chunk);
-    if(i===0 || i+chunkSize>=data.length || i%1000===0){
-      log("Enviado "+Math.min(i+chunk.length,data.length)+"/"+data.length);
+const PRINTABLE_MSG = {0:"Lista",1:"Imprimiendo",2:"Motor girando",10:"Sin trabajo",11:"Página no lista",12:"Trabajo cancelado",20:"Entorno no listo",
+  30:"Voltaje muy bajo (batería)",31:"Voltaje muy alto",32:"Cabezal no detectado",33:"Cabezal demasiado caliente",34:"Tapa abierta",35:"Sin papel",
+  39:"Temperatura ambiente muy baja",42:"Sin etiquetas",43:"Etiqueta no coincide",44:"Etiquetas agotadas",50:"Compartimento de etiquetas abierto"};
+
+/* ================= Conexión BLE ================= */
+let dev = null, chW = null, chData = null, chFC = null;
+let credit = -1, fcMtu = 0, rx = [], busy = false;
+
+function onData(ev) {
+  const v = new Uint8Array(ev.target.value.buffer, ev.target.value.byteOffset, ev.target.value.byteLength);
+  rx.push(...v);
+  log("FF01 ← " + hex(v));
+}
+function onFc(ev) {
+  const t = new Uint8Array(ev.target.value.buffer, ev.target.value.byteOffset, ev.target.value.byteLength);
+  if (t[0] === 1 && t.length === 2) { if (credit < 0) credit = t[1]; else credit += t[1]; }
+  else if (t[0] === 2 && t.length === 3) { fcMtu = t[1] | (t[2] << 8); log("FF03: MTU = " + fcMtu); }
+  else log("FF03 (no reconocido) ← " + hex(t));
+}
+
+async function connect() {
+  try {
+    $("connect").disabled = true; status("Buscando impresora...");
+    dev = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: "P2" }],
+      optionalServices: [SERVICE, U("ff10"), U("180a")]
+    });
+    log("Dispositivo: " + dev.name);
+    dev.addEventListener("gattserverdisconnected", () => {
+      chW = chData = chFC = null; credit = -1; fcMtu = 0;
+      $("print").disabled = $("probe").disabled = true; $("connect").disabled = false;
+      status("Desconectado", "err"); log("Bluetooth desconectado");
+    });
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE);
+    chW = await svc.getCharacteristic(WRITE_UUID);
+    chData = await svc.getCharacteristic(DATA_UUID);
+    try { chFC = await svc.getCharacteristic(FC_UUID); } catch (e) { chFC = null; log("Sin canal FF03 (control de flujo)."); }
+
+    credit = -1; fcMtu = 0; rx = [];
+    chData.addEventListener("characteristicvaluechanged", onData);
+    await chData.startNotifications(); await sleep(60);
+    if (chFC) {
+      chFC.addEventListener("characteristicvaluechanged", onFc);
+      await chFC.startNotifications();
+      for (let i = 0; i < 30 && credit < 0; i++) await sleep(50);      // espera el crédito inicial (01 NN)
+      log("Control de flujo: créditos = " + credit + ", MTU = " + fcMtu);
     }
-    await sleep(50);
+    status("Conectado a " + dev.name, "ok");
+    $("print").disabled = $("probe").disabled = false;
+  } catch (e) {
+    log("ERROR: " + e.message); status("Error de conexión", "err"); $("connect").disabled = false;
   }
 }
 
-function onNotify(event){
-  const data=new Uint8Array(
-    event.target.value.buffer,
-    event.target.value.byteOffset,
-    event.target.value.byteLength
-  );
-  log("FF01: "+hex(data));
-}
-
-async function connect(){
-  try{
-    $("connect").disabled=true;
-    status("Buscando impresora...");
-
-    device=await navigator.bluetooth.requestDevice({
-      filters:[{namePrefix:"P2"}],
-      optionalServices:[SERVICE]
-    });
-
-    log("Dispositivo: "+device.name);
-
-    device.addEventListener("gattserverdisconnected",()=>{
-      tx=null;
-      rx=null;
-      $("print").disabled=true;
-      $("connect").disabled=false;
-      status("Desconectado");
-      log("Bluetooth desconectado");
-    });
-
-    const server=await device.gatt.connect();
-    const service=await server.getPrimaryService(SERVICE);
-
-    tx=await service.getCharacteristic(TX_UUID);
-    rx=await service.getCharacteristic(RX_UUID);
-
-    await rx.startNotifications();
-    rx.addEventListener("characteristicvaluechanged",onNotify);
-
-    status("Conectado a "+device.name);
-    log("Conexión lista. FF02 escritura, FF01 recepción.");
-
-    $("print").disabled=false;
-
-  }catch(e){
-    log("ERROR: "+e.message);
-    status("Error de conexión");
-    $("connect").disabled=false;
+/* ================= Escritura con control de flujo ================= */
+async function writeRaw(bytes) {
+  for (let t = 1; ; t++) {
+    try { await chW.writeValueWithoutResponse(bytes); return; }
+    catch (e) { if (t >= 3) throw e; await sleep(20); }
   }
 }
+async function sendStream(data, label) {
+  const useFC = chFC && credit >= 0 && fcMtu > 0;
+  const chunk = useFC ? Math.min(fcMtu, 512) - 3 : 120;
+  log((label || "Enviando") + ": " + data.length + " bytes, bloques de " + chunk + (useFC ? " (con créditos)" : " (sin créditos, 10 ms)"));
+  let sent = 0, writes = 0;
+  while (sent < data.length) {
+    if (!dev.gatt.connected) throw new Error("Bluetooth desconectado durante el envío");
+    if (useFC) {
+      let waited = 0;
+      while (credit <= 0) { if (waited++ > 5000) throw new Error("La impresora no devuelve créditos (buffer lleno o error)"); await sleep(1); }
+      credit--;
+    }
+    const part = data.slice(sent, sent + chunk);
+    try { await writeRaw(part); } catch (e) { if (useFC) credit++; throw e; }
+    sent += part.length; writes++;
+    if (!useFC) await sleep(10);
+    if (writes % 10 === 0) status("Enviando " + Math.round(100 * sent / data.length) + " %");
+  }
+  await sleep(50);
+}
 
-async function printLabel(){
-  if(busy || !tx || !device?.gatt?.connected)return;
+/* ================= Consultas (solo lectura) ================= */
+async function query(cmd, timeout = 1500) {
+  rx = [];
+  await writeRaw(Uint8Array.from(frame(cmd)));
+  const end = Date.now() + timeout;
+  while (Date.now() < end) {
+    const { pk, rest } = parsePackages(rx); rx = rest;
+    const hit = pk.find(p => p.cmd === cmd);
+    if (hit) return hit.data;
+    await sleep(30);
+  }
+  return null;
+}
+async function probe() {
+  if (busy) return; busy = true; $("probe").disabled = $("print").disabled = true;
+  let ok = false;
+  try {
+    status("Consultando impresora...");
+    const items = [[LP.DEV_NAME, "Nombre"], [LP.SW_VER, "Software"], [LP.DEV_VER, "Hardware"], [LP.MANUF, "Fabricante"],
+                   [LP.DPI, "DPI"], [LP.WIDTH, "Ancho (px)"], [LP.BUF_SIZE, "Buffer"], [LP.IS_PRINTABLE, "Estado"]];
+    for (const [cmd, name] of items) {
+      const d = await query(cmd);
+      if (!d) { log(name + ": sin respuesta"); continue; }
+      ok = true;
+      let txt = hex(d);
+      if (cmd === LP.WIDTH && d.length >= 2) txt += " → " + ((d[0] << 8) | d[1]);
+      else if (cmd === LP.BUF_SIZE && d.length >= 2) txt += " → " + ((d[0] << 8) | d[1]) + " bytes";
+      else if (cmd === LP.IS_PRINTABLE) txt += " → " + (PRINTABLE_MSG[d[0]] || "código " + d[0]);
+      else if (d.length > 1) txt += " → \"" + ascii(d) + "\"";
+      log(name + ": " + txt);
+    }
+    status(ok ? "Protocolo LPAPI reconocido ✔" : "La impresora NO responde a LPAPI", ok ? "ok" : "err");
+    if (!ok) log("Sin respuesta: copie el registro completo y compártalo para seguir el diagnóstico.");
+  } catch (e) { log("ERROR: " + e.message); status("Error al consultar", "err"); }
+  finally { busy = false; const c = dev && dev.gatt && dev.gatt.connected; $("probe").disabled = $("print").disabled = !c; }
+  return ok;
+}
 
-  busy=true;
-  $("print").disabled=true;
+/* ================= Diseño y rasterizado ================= */
+const canvas = $("preview"), ctx = canvas.getContext("2d");
+const W = 384, DOTS_PER_MM = 203 / 25.4;
+let userImg = null;
+function labelRows() { return Math.max(8, Math.round(parseFloat($("hmm").value) * DOTS_PER_MM)); }
 
-  try{
+function drawLabel() {
+  const H = labelRows();
+  if (canvas.height !== H) canvas.height = H;
+  $("dim").textContent = W + " × " + H + " px";
+  ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#000"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  if (userImg) {
+    const k = Math.min(W / userImg.width, H / userImg.height), w = userImg.width * k, h = userImg.height * k;
+    ctx.drawImage(userImg, (W - w) / 2, (H - h) / 2, w, h);
+  } else {
+    const fit = (txt, size, bold, y) => { let s = size; do { ctx.font = (bold ? "bold " : "") + s + "px Arial"; s -= 2; } while (ctx.measureText(txt).width > W - 24 && s > 8); ctx.fillText(txt, W / 2, y); };
+    fit($("t1").value, 38, true, H * 0.24);
+    fit($("t2").value, 30, true, H * 0.50);
+    fit($("t3").value, 24, false, H * 0.76);
+  }
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 3; ctx.strokeRect(4, 4, W - 8, H - 8);
+}
+
+function rasterize(cv, offsetX, threshold) {
+  const w = cv.width, h = cv.height, byteWidth = W / 8;
+  const d = cv.getContext("2d").getImageData(0, 0, w, h).data, rows = [];
+  for (let y = 0; y < h; y++) {
+    const row = new Array(byteWidth).fill(0);
+    for (let x = 0; x < w; x++) {
+      const p = (y * w + x) * 4, a = d[p + 3] / 255;
+      const g = (0.299 * d[p] + 0.587 * d[p + 1] + 0.114 * d[p + 2]) * a + 255 * (1 - a);
+      const sx = x + offsetX;
+      if (g < threshold && sx >= 0 && sx < W) row[sx >> 3] |= 0x80 >> (sx & 7);
+    }
+    rows.push(row);
+  }
+  return { rows, byteWidth };
+}
+
+/* ================= Impresión ================= */
+let pageCounter = Math.floor(Math.random() * 30000) + 1;
+async function waitIdle(maxMs) {
+  const end = Date.now() + maxMs; let last = -1;
+  while (Date.now() < end) {
+    const d = await query(LP.IS_PRINTABLE, 1200);
+    if (d) { if (d[0] !== last) { log("Estado: " + (PRINTABLE_MSG[d[0]] || d[0])); last = d[0]; } if (d[0] !== 1 && d[0] !== 2) return d[0]; }
+    await sleep(350);
+  }
+  return last;
+}
+
+async function printLabel() {
+  if (busy || !chW || !dev?.gatt?.connected) return;
+  busy = true; $("print").disabled = $("probe").disabled = true;
+  try {
     drawLabel();
+    // 1) Verificación previa: no se envía nada de impresión si la impresora no habla LPAPI o tiene un error.
+    status("Verificando impresora...");
+    const st = await query(LP.IS_PRINTABLE);
+    if (!st) {
+      log("La impresora no respondió a la consulta de estado LPAPI.");
+      if (!$("force").checked) { status("Sin respuesta LPAPI: impresión cancelada", "err"); return; }
+      log("Se fuerza la impresión por petición del usuario.");
+    } else {
+      log("Estado: " + (PRINTABLE_MSG[st[0]] || st[0]));
+      if (st[0] >= 20) { status("Impresora no lista: " + (PRINTABLE_MSG[st[0]] || st[0]), "err"); return; }
+      if (st[0] === 1 || st[0] === 2) await waitIdle(8000);
+    }
 
-    log("INICIO DE IMPRESIÓN");
-    status("Inicializando impresora...");
+    // 2) Construcción de las páginas
+    const offsetX = parseInt($("ox").value), thr = parseInt($("thr").value);
+    const { rows, byteWidth } = rasterize(canvas, offsetX, thr);
+    const copies = Math.max(1, parseInt($("copies").value) || 1);
+    const opts = { rows, byteWidth, gapType: parseInt($("gap").value), gapLenMM: parseFloat($("gaplen").value), darkness: parseInt($("dens").value) };
+    log("INICIO: " + W + "×" + rows.length + " px, " + byteWidth + " bytes/fila, gap=" + opts.gapType + ", copias=" + copies);
 
-    // 1. Activar modo de impresora LuckPrinter
-    await write(new Uint8Array([0x10,0xFF,0xF1,0x03]));
-    await sleep(250);
-
-    // 2. Despertar impresora: 12 bytes cero
-    await write(new Uint8Array(12));
-    await sleep(250);
-
-    // 3. Ajuste de posición para primera etiqueta
-    await write(new Uint8Array([0x1F,0x11,0x51]));
-    await sleep(150);
-
-    // 4. Raster ESC/POS sin compresión
-    const bitmap=rasterize();
-    const raster=makeRaster(bitmap);
-
-    log("Imagen: 384 x 240 px");
-    log("Datos de imagen: "+bitmap.length+" bytes");
-    log("Cabecera raster: "+hex(raster.slice(0,8)));
-
-    status("Transmitiendo imagen...");
-    await sendStream(raster);
-
-    await sleep(300);
-
-    // 5. Posicionar a la siguiente etiqueta
-    status("Finalizando etiqueta...");
-    await write(new Uint8Array([0x1D,0x0C]));
-    await sleep(300);
-
-    // 6. Ajuste final de posición
-    await write(new Uint8Array([0x1F,0x11,0x50]));
-    await sleep(200);
-
-    // 7. Cerrar trabajo
-    await write(new Uint8Array([0x10,0xFF,0xF1,0x45]));
-
-    log("Secuencia enviada.");
-    log("Esperando respuesta de impresora...");
-    status("Trabajo enviado. Verifique impresión.");
-
-  }catch(e){
-    log("ERROR: "+e.message);
-    status("Error de impresión");
-  }finally{
-    busy=false;
-    $("print").disabled=!device?.gatt?.connected;
+    // 3) Envío página por página
+    for (let c = 1; c <= copies; c++) {
+      const page = buildPage({ ...opts, pageKey: (pageCounter++ % 65535) + 1 });
+      log("Cabecera: " + hex(page.slice(0, 24)));
+      status("Imprimiendo " + c + " / " + copies + "...");
+      await sendStream(page, "Página " + c);
+    }
+    log("Datos enviados. Esperando fin de impresión...");
+    status("Imprimiendo...");
+    await sleep(600);
+    const fin = await waitIdle(20000);
+    log("Estado final: " + (PRINTABLE_MSG[fin] ?? fin));
+    status(fin >= 20 ? "Error de impresora: " + (PRINTABLE_MSG[fin] || fin) : "Trabajo terminado. Verifique la etiqueta.", fin >= 20 ? "err" : "ok");
+  } catch (e) {
+    log("ERROR: " + e.message); status("Error de impresión", "err");
+  } finally {
+    busy = false; const c = dev && dev.gatt && dev.gatt.connected; $("print").disabled = $("probe").disabled = !c;
   }
 }
 
-$("connect").addEventListener("click",connect);
-$("print").addEventListener("click",printLabel);
-$("clear").addEventListener("click",()=>{$("log").textContent="";});
+/* API reutilizable desde otras páginas:  P2.printCanvas(canvas, {gapType, gapLenMM, darkness, offsetX, threshold, copies}) */
+window.P2 = {
+  async printCanvas(cv, o = {}) {
+    const { rows, byteWidth } = rasterize(cv, o.offsetX || 0, o.threshold || 128);
+    for (let c = 0; c < (o.copies || 1); c++) {
+      await sendStream(buildPage({ rows, byteWidth, pageKey: (pageCounter++ % 65535) + 1,
+        gapType: o.gapType ?? 2, gapLenMM: o.gapLenMM ?? 3, darkness: o.darkness ?? 6 }), "Página");
+    }
+  },
+  frame, encodeRows, buildPage, parsePackages
+};
+
+/* ================= Eventos ================= */
+$("connect").addEventListener("click", connect);
+$("probe").addEventListener("click", probe);
+$("print").addEventListener("click", printLabel);
+$("clear").addEventListener("click", () => { $("log").textContent = ""; });
+$("copy").addEventListener("click", async () => { try { await navigator.clipboard.writeText($("log").textContent); status("Registro copiado", "ok"); } catch (e) { log("No se pudo copiar: " + e.message); } });
+["t1", "t2", "t3", "hmm"].forEach(id => $(id).addEventListener("input", drawLabel));
+$("ox").addEventListener("input", () => { $("oxv").textContent = $("ox").value; });
+$("img").addEventListener("change", e => {
+  const f = e.target.files[0]; if (!f) { userImg = null; drawLabel(); return; }
+  const im = new Image(); im.onload = () => { userImg = im; drawLabel(); }; im.src = URL.createObjectURL(f);
+});
 
 drawLabel();
-
-if(!navigator.bluetooth){
-  status("Abra esta página en Chrome Android");
-  $("connect").disabled=true;
-}
+if (!navigator.bluetooth) { status("Abra esta página en Chrome para Android (HTTPS)", "err"); $("connect").disabled = true; }
 </script>
 </body>
 </html>
